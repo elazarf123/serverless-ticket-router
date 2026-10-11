@@ -1,34 +1,12 @@
 # Serverless Ticket Router
 
-An Azure Functions (Python v2 programming model) HTTP API that reads an incoming support ticket and decides where it goes: which department queue, what priority, and what SLA. Routing uses weighted keyword scoring, so the logic is transparent and easy to tune.
+![Status: in progress](https://img.shields.io/badge/status-in%20progress-yellow)
 
-## What it does
+An Azure Functions HTTP API that reads a support ticket and decides its department queue, priority (P1–P4), and SLA, so urgent issues reach the right team without manual triage.
 
-For each ticket (`sender`, `subject`, `body`) the router:
+## Results
 
-1. **Scores departments.** Each department has weighted keywords. A keyword match in the subject counts double; a match in the body counts once. The highest score wins, with a confidence score between 0.25 and 0.99. No match sends the ticket to `General Inquiries`.
-2. **Sets priority (P1–P4).** Urgent phrases (for example `outage`, `ransomware`, `error 500`, `cannot login`) force P1 or P2 and mark the ticket escalated. Otherwise the department's default priority applies. Senders from configured VIP domains are raised to at least P2. A `priority_override` in the request wins over all of this.
-3. **Assigns an SLA** from the priority: P1 = 1 h, P2 = 4 h, P3 = 12 h, P4 = 24 h.
-4. **Tags the ticket** with any CVE IDs and HTTP 4xx/5xx status codes found in the text, plus `ESCALATED` and `VIP-CUSTOMER` where they apply.
-
-| Department | Queue | Default priority |
-| :--- | :--- | :--- |
-| Security & Compliance | `queue-secops` | P2 |
-| IT Support & Infrastructure | `queue-it-infra` | P3 |
-| Billing & Finance | `queue-billing` | P3 |
-| Customer Success & Accounts | `queue-customer-success` | P3 |
-| General Inquiries (fallback) | `queue-triage-general` | P4 |
-
-All rules live in [`src/router/config.py`](src/router/config.py).
-
-## Endpoints
-
-| Method | Route | Purpose |
-| :--- | :--- | :--- |
-| `GET` | `/api/health` | Health check |
-| `POST` | `/api/route_ticket` | Route one ticket |
-
-### Example
+**Sample output (illustrative).** This is the routing result for the example ticket below; it is also checked by [`tests/test_engine.py`](tests/test_engine.py).
 
 Request:
 
@@ -41,48 +19,37 @@ Request:
 }
 ```
 
-Routing result (the `routing` object in the response; `routed_at` will be the current time):
+| Field | Value |
+| :--- | :--- |
+| Department / queue | IT Support & Infrastructure / `queue-it-infra` |
+| Priority / SLA | P2 / 4 hours (escalated by "error 500") |
+| Confidence | 0.76 |
+| Matched keywords | `server down`, `error 500` |
+| Tags | `CVE-2099-0001`, `HTTP-500`, `ESCALATED` |
 
-```json
-{
-  "department": "IT Support & Infrastructure",
-  "queue": "queue-it-infra",
-  "priority": "P2",
-  "sla_hours": 4,
-  "confidence_score": 0.76,
-  "matched_keywords": ["error 500", "server down"],
-  "is_escalated": true,
-  "tags": ["CVE-2099-0001", "HTTP-500", "ESCALATED"],
-  "routed_at": "2026-09-29T20:15:00+00:00"
-}
-```
+## How it works
 
-The full response also includes `status`, `ticket_id`, `sender`, `subject`, and `execution_time_ms`. Invalid input returns HTTP 400 with an error message.
+- **Department scoring:** each department has weighted keywords; a match in the subject counts double, a match in the body counts once. No match goes to `General Inquiries`.
+- **Priority:** urgent phrases (for example `outage`, `ransomware`, `error 500`, `cannot login`) force P1 or P2 and mark the ticket escalated; otherwise the department default applies. VIP sender domains are raised to at least P2, and `priority_override` wins over everything.
+- **SLA:** P1 = 1 h, P2 = 4 h, P3 = 12 h, P4 = 24 h.
+- **Tags:** CVE IDs and HTTP 4xx/5xx codes found in the text, plus `ESCALATED` and `VIP-CUSTOMER`.
+- **Endpoints:** `GET /api/health` and `POST /api/route_ticket` ([`function_app.py`](function_app.py)). All rules live in [`src/router/config.py`](src/router/config.py).
 
-## Project structure
+## Tech stack
 
-```text
-function_app.py            # Azure Functions HTTP triggers (health, route_ticket)
-host.json                  # Functions host configuration
-requirements.txt           # azure-functions, pydantic, pyspark
-src/router/config.py       # Departments, keyword weights, priority keywords, SLAs, VIP domains
-src/router/engine.py       # TicketRouter: department scoring, priority, tags
-src/router/models.py       # Pydantic request/response models
-src/utils/logger.py        # JSON log formatter
-src/spark/spark_router.py  # Starter PySpark batch job (currently loads and previews a JSON file)
-```
+Python 3.9+ · Azure Functions (v2 programming model) · Pydantic · pytest
 
-## Run locally
-
-Requires Python 3.9+ and [Azure Functions Core Tools v4](https://learn.microsoft.com/azure/azure-functions/functions-run-local).
+## Run it
 
 ```bash
 git clone https://github.com/elazarf123/serverless-ticket-router.git
 cd serverless-ticket-router
 python -m venv .venv
-source .venv/bin/activate      # Windows: .venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-func start
+source .venv/bin/activate          # Windows: .venv\Scripts\Activate.ps1
+pip install -r requirements.txt -r requirements-dev.txt
+
+pytest                             # 6 unit tests for scoring, priority, and tagging
+func start                         # needs Azure Functions Core Tools v4
 ```
 
 Then send a ticket:
@@ -93,8 +60,15 @@ curl -X POST http://localhost:7071/api/route_ticket \
   -d '{"sender":"user@example.com","subject":"VPN not connecting","body":"Cannot login to VPN from home."}'
 ```
 
+## What I learned
+
+- Keyword scoring is easy to explain and tune, which matters when a support team has to trust the routing.
+- Word-boundary matching needs care: `CVE-2099-0001` also matches the `cve` keyword, which nudges the Security score.
+- Unit tests pinned the README example, so the docs and the code can't drift apart.
+
 ## Roadmap
 
-- Unit tests for scoring, priority, and tagging
-- Finish the PySpark batch job so it routes a file of tickets and writes the results
+- Finish the PySpark batch job ([`src/spark/spark_router.py`](src/spark/spark_router.py)) so it routes a file of tickets; today it only loads and previews a JSON file
 - Load routing rules from a config file or storage instead of code
+
+> Lab use only. Status: in progress.

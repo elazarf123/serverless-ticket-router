@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.env
+# Azure Functions
+local.settings.json
+.python_packages/
+bin/
+obj/
+.DS_Store
